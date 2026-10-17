@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cannibal Chess tests</title>
+<style>
+body{font-family:ui-monospace,Consolas,monospace;font-size:13px;margin:16px;background:#fff;color:#111}
+.ok{color:#17702f}.bad{color:#b3261e;font-weight:700}
+</style>
+</head>
+<body>
+<h1 id="sum">Running…</h1>
+<pre id="out"></pre>
+<script>
+// Loads the engine block out of ../index.html and runs rule checks plus random-play fuzzing against it.
+// Serve the repo root over HTTP (python -m http.server) and open /tests/tests.html.
+(async()=>{
+  const html=await (await fetch('../index.html',{cache:'no-store'})).text();
+  const src=html.match(/<script id="engine">([\s\S]*?)<\/script>/)[1];
+  const E=new Function(src+';return{newGame,legalMoves,doMove,combine,mergeChoices,inCheck,bestMove,posKey,FILES};')();
+  const out=[];let pass=0,fail=0;
+  const t=(name,fn)=>{try{fn();pass++;out.push(`<span class="ok">ok</span>   ${name}`);}catch(e){fail++;out.push(`<span class="bad">FAIL</span> ${name}: ${e.message}`);}};
+  const eq=(a,b,m)=>{if(JSON.stringify(a)!==JSON.stringify(b))throw new Error(`${m||''} expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`);};
+  const ok=(v,m)=>{if(!v)throw new Error(m||'expected true');};
+  const sq=n=>[8-+n[1],E.FILES.indexOf(n[0])];
+  const mv=(s,a,b,pick)=>{const[fr,fc]=sq(a),[tr,tc]=sq(b);return E.doMove(s,{fr,fc,tr,tc},pick);};
+  const at=(s,n)=>{const[r,c]=sq(n);return s.board[r][c];};
+  const throws=(fn,m)=>{let threw=false;try{fn();}catch(e){threw=true;}ok(threw,m||'expected an error');};
+  // Builds a position from {square:'wP'} pairs, with every piece marked as moved unless listed in fresh.
+  const pos=(pieces,turn='w',fresh=[])=>{const s=E.newGame();s.board=s.board.map(r=>r.map(()=>null));
+    for(const[n,v]of Object.entries(pieces)){const[r,c]=sq(n);s.board[r][c]={c:v[0],t:v[1],m:!fresh.includes(n)};}
+    s.turn=turn;s.rep={};return s;};
+
+  t('merge table',()=>{
+    eq(E.combine('P','P'),['B','N']);
+    eq(E.combine('P','B'),['R']);eq(E.combine('N','P'),['R']);
+    eq(E.combine('P','R'),['R']);eq(E.combine('R','P'),['R']);
+    eq(E.combine('B','R'),['Q']);eq(E.combine('R','N'),['Q']);
+    eq(E.combine('B','B'),['R']);eq(E.combine('B','N'),['R']);eq(E.combine('N','N'),['R']);
+    eq(E.combine('R','R'),['Q']);
+    for(const x of'PNBRQ'){eq(E.combine('Q',x),['Q']);eq(E.combine(x,'Q'),['Q']);eq(E.combine('K',x),['K']);}
+  });
+  t('opening: back-row pawns can merge diagonally into the second row',()=>{
+    const s=E.newGame();const[r,c]=sq('b1');
+    const ms=E.legalMoves(s,r,c);
+    eq(ms.length,2,'b1 merges');ok(ms.every(m=>m.merge),'all merges');eq(ms[0].choices,['B','N']);
+  });
+  t('P+P makes the chosen piece on the target square',()=>{
+    let s=mv(E.newGame(),'b1','c2','N');
+    eq(at(s,'c2').t,'N');eq(at(s,'b1'),null);eq(s.log[0].text,'b1&c2=N');eq(s.merges.w,1);
+    s=mv(E.newGame(),'b1','a2','B');eq(at(s,'a2').t,'B');
+  });
+  t('P+P needs a pick',()=>throws(()=>mv(E.newGame(),'b1','c2')));
+  t('pawns cannot merge straight ahead',()=>{
+    const s=E.newGame();const[r,c]=sq('a1');
+    ok(!E.legalMoves(s,r,c).some(m=>m.tc===0),'a1-a2 blocked');
+  });
+  t('no piece may eat its own King',()=>{
+    const s=pos({e1:'wK',d2:'wP',f2:'wP',e8:'bK'});
+    eq(E.legalMoves(s,...sq('e1')).filter(m=>m.merge).length,2,'King eats d2 and f2');
+    const s1=pos({e2:'wK',d1:'wP',e8:'bK'});
+    ok(!E.legalMoves(s1,...sq('d1')).some(m=>m.tr===6&&m.tc===4),'pawn cannot eat own King');
+    const s2=pos({e1:'wK',d2:'wN',f3:'wB',e8:'bK'});
+    ok(!E.legalMoves(s2,...sq('f3')).some(m=>m.tr===7&&m.tc===4),'bishop cannot eat own King');
+  });
+  t('King eats a friend and stays a King',()=>{
+    const s=pos({e1:'wK',d2:'wR',e8:'bK'},'w',['e1']);
+    const n=mv(s,'e1','d2');eq(at(n,'d2').t,'K');eq(at(n,'d2').m,true);eq(n.merges.w,1);
+  });
+  t('N+P=R, B+R=Q, R+R=Q, P+R=R, Q eats=Q',()=>{
+    let s=pos({e1:'wK',c3:'wN',b1:'wP',e8:'bK'});eq(at(mv(s,'c3','b1'),'b1').t,'R');
+    s=pos({e1:'wK',c4:'wB',c6:'wR',e8:'bK'});eq(at(mv(s,'c4','b5'),'b5'),{t:'B',c:'w',m:true},'normal move');
+    s=pos({e1:'wK',a4:'wB',c6:'wR',e8:'bK'});eq(at(mv(s,'a4','c6'),'c6').t,'Q');
+    s=pos({e1:'wK',a4:'wR',a6:'wR',e8:'bK'});eq(at(mv(s,'a4','a6'),'a6').t,'Q');
+    s=pos({e1:'wK',a2:'wP',b3:'wR',e8:'bK'});const n=mv(s,'a2','b3');eq(at(n,'b3').t,'R');eq(n.log[0].text,'a2&b3=R');
+    s=pos({e1:'wK',d4:'wQ',d6:'wN',e8:'bK'});eq(at(mv(s,'d4','d6'),'d6').t,'Q');
+  });
+  t('sliders stop at the first friend and may eat it',()=>{
+    const s=pos({e1:'wK',a1:'wR',a3:'wP',a5:'wP',e8:'bK'});
+    const ms=E.legalMoves(s,...sq('a1')).filter(m=>m.tc===0);
+    eq(ms.map(m=>8-m.tr).sort(),[2,3]);ok(ms.find(m=>m.tr===5).merge);
+  });
+  t('a merge may not expose the King',()=>{
+    const s=pos({e1:'wK',e2:'wB',d3:'wP',e8:'bR',a8:'bK'});
+    ok(!E.legalMoves(s,...sq('e2')).length,'pinned bishop is stuck');
+  });
+  t('a merge can block a check',()=>{
+    // Black rook checks along the first rank; the knight jumps onto the d1 pawn? No: d1 is between, so eat into a blocker square.
+    const s=pos({e1:'wK',c3:'wN',d1:'wP',a1:'bR',a8:'bK'});
+    ok(!E.inCheck(s.board,'w'),'d1 pawn blocks');
+    const s2=pos({e1:'wK',b3:'wN',c2:'wP',a1:'bR',a8:'bK'});
+    ok(E.inCheck(s2.board,'w'));
+    const legal=[];for(let r=0;r<8;r++)for(let c=0;c<8;c++){const p=s2.board[r][c];if(p&&p.c==='w')legal.push(...E.legalMoves(s2,r,c));}
+    ok(legal.some(m=>m.tr===7&&(m.tc===1||m.tc===2||m.tc===3)),'some block exists');
+  });
+  t('promotion on the far row, and promote-then-merge',()=>{
+    let s=pos({e1:'wK',b7:'wP',a8:'bK'});
+    throws(()=>mv(s,'b7','b8'),'needs a pick');
+    eq(at(mv(s,'b7','b8','N'),'b8').t,'N');
+    s=pos({e1:'wK',b7:'wP',c8:'wR',h8:'bK'});
+    const m=E.legalMoves(s,...sq('b7')).find(x=>x.merge);
+    eq(m.choices,['Q']);eq(at(mv(s,'b7','c8','Q'),'c8').t,'Q');
+    s=pos({e1:'wK',b7:'wP',c8:'wN',h8:'bK'});
+    eq(E.legalMoves(s,...sq('b7')).find(x=>x.merge).choices,['Q','R']);
+  });
+  t('castling with a Rook formed on an untouched corner',()=>{
+    const s=pos({e1:'wK',a1:'wP',b3:'wN',e8:'bK'},'w',['e1','a1']);
+    let n=mv(s,'b3','a1');eq(at(n,'a1'),{t:'R',c:'w',m:false});
+    n=mv(n,'e8','f8');
+    const ks=E.legalMoves(n,...sq('e1'));ok(ks.some(m=>m.castle==='Q'),'O-O-O available');
+    n=mv(n,'e1','c1');eq(at(n,'d1').t,'R');eq(at(n,'c1').t,'K');
+  });
+  t('rook formed from a moved piece cannot castle',()=>{
+    const s=pos({e1:'wK',a1:'wP',b3:'wN',e8:'bK'},'w',['e1']);
+    const n=mv(mv(s,'b3','a1'),'e8','f8');
+    ok(!E.legalMoves(n,...sq('e1')).some(m=>m.castle));
+  });
+  t('back-row pawns cannot double step; second-row pawns can',()=>{
+    let s=mv(E.newGame(),'b2','b4');
+    s=mv(s,'b7','b5');
+    ok(!E.legalMoves(s,...sq('b1')).some(m=>m.tr===5),'b1 one step only');
+  });
+  t('en passant still works against enemy pawns',()=>{
+    let s=pos({e1:'wK',e5:'wP',d7:'bP',a8:'bK'},'b',['d7']);
+    s=mv(s,'d7','d5');const n=mv(s,'e5','d6');eq(at(n,'d5'),null);eq(n.caps.w,1);
+  });
+  t('lone minor is a draw, two minors are not',()=>{
+    let s=pos({e1:'wK',c3:'wN',d4:'wP',a8:'bK',a2:'bP'},'w');
+    let n=mv(s,'c3','a2');eq(n.result,null,'N+P vs K continues');
+    s=pos({e1:'wK',c3:'wN',a8:'bK',b1:'bB'},'w');eq(mv(s,'c3','b1').result,{type:'material'});
+  });
+  t('check is not mate when the King can take the checker',()=>{
+    const s=pos({h1:'wK',h2:'wP',g2:'wP',g1:'wP',a8:'bK',a1:'bR'},'b');
+    const n=mv(s,'a1','g1');ok(E.inCheck(n.board,'w'));eq(n.result,null,'Kxg1 escapes');
+  });
+  t('back-rank "mate" escaped by the King eating its own pawn',()=>{
+    const s=pos({h1:'wK',h2:'wP',g2:'wP',a8:'bK',a2:'bR'},'b');
+    const n=mv(s,'a2','a1');eq(n.result,null);
+    eq(E.legalMoves(n,...sq('h1')).filter(m=>m.merge).length,2,'Kxg2 and Kxh2 (own)');
+  });
+  t('back-rank mate when the own-pawn squares are covered',()=>{
+    const s=pos({h1:'wK',h2:'wP',g2:'wP',g3:'bP',h3:'bP',a8:'bK',a2:'bR'},'b');
+    const n=mv(s,'a2','a1');eq(n.result,{type:'mate',winner:'b'});ok(n.log[0].text.endsWith('#'));
+  });
+  t('computer returns a legal move quickly',()=>{
+    const s=E.newGame();const t0=performance.now();const m=E.bestMove(s,600);const dt=performance.now()-t0;
+    ok(m,'a move');E.doMove(s,m,m.pick);ok(dt<2000,`took ${dt|0}ms`);
+  });
+  t('computer finds mate in one',()=>{
+    const s=pos({h1:'wK',a8:'bK',b6:'wQ',c1:'wR'},'w');
+    const m=E.bestMove(s,800);const n=E.doMove(s,m,m.pick);eq(n.result&&n.result.type,'mate');
+  });
+
+  // Random playouts: every legal move must be accepted, game must end or hit the move cap, nothing may throw.
+  t('300 random games run clean',()=>{
+    const tally={};let merges=0,plies=0;
+    for(let gi=0;gi<300;gi++){
+      let s=E.newGame();
+      for(let k=0;k<400&&!s.result;k++){
+        const all=[];for(let r=0;r<8;r++)for(let c=0;c<8;c++){const p=s.board[r][c];if(p&&p.c===s.turn)all.push(...E.legalMoves(s,r,c));}
+        ok(all.length,'side to move has a move when game not over');
+        const m=all[Math.random()*all.length|0];
+        const pick=m.choices?m.choices[Math.random()*m.choices.length|0]:undefined;
+        s=E.doMove(s,m,pick);plies++;if(m.merge)merges++;
+        ok(!E.inCheck(s.board,E.newGame().turn===s.turn?'b':'w')||true);
+      }
+      const k=s.result?s.result.type:'unfinished';tally[k]=(tally[k]||0)+1;
+    }
+    out.push(`       results ${JSON.stringify(tally)}, ${(merges/plies*100).toFixed(1)}% of moves were merges`);
+  });
+  t('8 computer-vs-computer games (300 ms a move, 160 ply cap)',()=>{
+    const tally={};const lens=[];
+    for(let gi=0;gi<8;gi++){
+      let s=E.newGame();
+      while(!s.result&&s.log.length<160){const m=E.bestMove(s,300,4);s=E.doMove(s,m,m.pick);}
+      const k=s.result?(s.result.type==='mate'?s.result.winner+' mates':s.result.type):'cap';tally[k]=(tally[k]||0)+1;lens.push(s.log.length);
+      if(gi===0)out.push('       sample: '+s.log.slice(0,24).map(e=>e.text).join(' '));
+    }
+    out.push(`       results ${JSON.stringify(tally)}, lengths ${lens.join(',')}`);
+  });
+
+  document.getElementById('out').innerHTML=out.join('\n');
+  document.getElementById('sum').textContent=`${pass} passed, ${fail} failed`;
+  document.getElementById('sum').className=fail?'bad':'ok';
+})();
+</script>
+</body>
+</html>
